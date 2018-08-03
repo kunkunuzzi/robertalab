@@ -5,7 +5,9 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import de.fhg.iais.roberta.components.ConfigurationBlockType;
+import de.fhg.iais.roberta.components.SensorType;
 import de.fhg.iais.roberta.components.UsedConfigurationBlock;
+import de.fhg.iais.roberta.components.UsedSensor;
 import de.fhg.iais.roberta.components.arduino.ArduinoConfiguration;
 import de.fhg.iais.roberta.mode.action.MotorMoveMode;
 import de.fhg.iais.roberta.mode.sensor.HumiditySensorMode;
@@ -73,6 +75,7 @@ public class CppVisitor extends ArduinoVisitor implements ArduinoAstVisitor<Void
     private CppVisitor(ArduinoConfiguration brickConfiguration, ArrayList<ArrayList<Phrase<Void>>> phrases, int indentation) {
         super(phrases, indentation);
         UsedHardwareCollectorVisitor codePreprocessVisitor = new UsedHardwareCollectorVisitor(phrases, brickConfiguration);
+        this.usedSensors = codePreprocessVisitor.getUsedSensors();
         this.usedVars = codePreprocessVisitor.getVisitedVars();
         this.usedConfigurationBlocks = codePreprocessVisitor.getUsedConfigurationBlocks();
         //TODO: fix how the timer is detected for all robots
@@ -100,7 +103,9 @@ public class CppVisitor extends ArduinoVisitor implements ArduinoAstVisitor<Void
 
     @Override
     public Void visitShowTextAction(ShowTextAction<Void> showTextAction) {
-        this.sb.append("lcd_" + showTextAction.getPort().getOraName() + ".setCursor(0,");
+        this.sb.append("lcd_" + showTextAction.getPort().getOraName() + ".setCursor(");
+        showTextAction.getX().visit(this);
+        this.sb.append(",");
         showTextAction.getY().visit(this);
         this.sb.append(");");
         nlIndent();
@@ -162,6 +167,15 @@ public class CppVisitor extends ArduinoVisitor implements ArduinoAstVisitor<Void
 
     @Override
     public Void visitLightStatusAction(LightStatusAction<Void> lightStatusAction) {
+        String[] colors = {
+            "red",
+            "green",
+            "blue"
+        };
+        for ( int i = 0; i < 3; i++ ) {
+            this.sb.append("analogWrite(_led_" + colors[i] + "_" + lightStatusAction.getPort().getOraName() + ", 0);");
+            nlIndent();
+        }
         return null;
     }
 
@@ -256,7 +270,7 @@ public class CppVisitor extends ArduinoVisitor implements ArduinoAstVisitor<Void
 
     @Override
     public Void visitLightSensor(LightSensor<Void> lightSensor) {
-        this.sb.append("analogRead(_output_" + lightSensor.getPort().getOraName() + ")");
+        this.sb.append("analogRead(_output_" + lightSensor.getPort().getOraName() + ")*100/1024");
         return null;
     }
 
@@ -266,25 +280,33 @@ public class CppVisitor extends ArduinoVisitor implements ArduinoAstVisitor<Void
         return null;
     }
 
-    @Override
-    public Void visitUltrasonicSensor(UltrasonicSensor<Void> ultrasonicSensor) {
-        this.sb.append("pulseIn(_echo_" + ultrasonicSensor.getPort().getOraName() + ", HIGH)*_signalToDistance;");
+    public void measureDistanceUltrasonicSensor(String sensorName) {
+        this.sb.append("double _getUltrasonicDistance()\n{");
         nlIndent();
-        this.sb.append("digitalWrite(_trigger_" + ultrasonicSensor.getPort().getOraName() + ", LOW);");
+        this.sb.append("digitalWrite(_trigger_" + sensorName + ", LOW);");
         nlIndent();
         this.sb.append("delay(5);");
         nlIndent();
-        this.sb.append("digitalWrite(_trigger_" + ultrasonicSensor.getPort().getOraName() + ", HIGH);");
+        this.sb.append("digitalWrite(_trigger_" + sensorName + ", HIGH);");
         nlIndent();
         this.sb.append("delay(10);");
         nlIndent();
-        this.sb.append("digitalWrite(_trigger_" + ultrasonicSensor.getPort().getOraName() + ", LOW)");
+        this.sb.append("digitalWrite(_trigger_" + sensorName + ", LOW);");
+        nlIndent();
+        this.sb.append("return pulseIn(_echo_" + sensorName + ", HIGH)*_signalToDistance;");
+        this.decrIndentation();
+        this.sb.append("\n}");
+    }
+
+    @Override
+    public Void visitUltrasonicSensor(UltrasonicSensor<Void> ultrasonicSensor) {
+        this.sb.append("_getUltrasonicDistance()");
         return null;
     }
 
     @Override
     public Void visitMoistureSensor(MoistureSensor<Void> moistureSensor) {
-        this.sb.append("analogRead(_moisturePin_" + moistureSensor.getPort().getOraName() + ")");
+        this.sb.append("analogRead(_moisturePin_" + moistureSensor.getPort().getOraName() + ")*100/1024");
         return null;
     }
 
@@ -302,7 +324,7 @@ public class CppVisitor extends ArduinoVisitor implements ArduinoAstVisitor<Void
 
     @Override
     public Void visitVoltageSensor(VoltageSensor<Void> potentiometer) {
-        this.sb.append("((double)analogRead(_output_" + potentiometer.getPort().getOraName() + "))*5/1023");
+        this.sb.append("((double)analogRead(_output_" + potentiometer.getPort().getOraName() + "))*5/1024");
         return null;
     }
 
@@ -357,20 +379,52 @@ public class CppVisitor extends ArduinoVisitor implements ArduinoAstVisitor<Void
         return null;
     }
 
-    @Override
-    public Void visitInfraredSensor(InfraredSensor<Void> infraredSensor) {
+    public void measureIRValue(UsedSensor infraredSensor) {
         switch ( (InfraredSensorMode) infraredSensor.getMode() ) {
             case PRESENCE:
-                this.sb.append("_irrecv_" + infraredSensor.getPort().getOraName() + ".decode(&_results_" + infraredSensor.getPort().getOraName() + ");");
+                this.sb.append("bool _getIRResults()\n{");
+                incrIndentation();
+                nlIndent();
+                this.sb.append("bool results = false;");
+                nlIndent();
+                this.sb.append("if (_irrecv_" + infraredSensor.getPort().getOraName() + ".decode(&_results_" + infraredSensor.getPort().getOraName() + ")) {");
+                incrIndentation();
+                nlIndent();
+                this.sb.append("results = true;");
+                nlIndent();
+                this.sb.append("_irrecv_" + infraredSensor.getPort().getOraName() + ".resume();");
+                decrIndentation();
+                nlIndent();
+                this.sb.append("}");
                 break;
             case VALUE:
-                this.sb.append("(_results_" + infraredSensor.getPort().getOraName() + ", DEC);");
+                this.sb.append("long int _getIRResults()\n{");
+                incrIndentation();
+                nlIndent();
+                this.sb.append("long int results = 0;");
+                nlIndent();
+                this.sb.append("if (_irrecv_" + infraredSensor.getPort().getOraName() + ".decode(&_results_" + infraredSensor.getPort().getOraName() + ")) {");
+                incrIndentation();
+                nlIndent();
+                this.sb.append("results = _results_" + infraredSensor.getPort().getOraName() + ".value;");
+                nlIndent();
+                this.sb.append("_irrecv_" + infraredSensor.getPort().getOraName() + ".resume();");
+                decrIndentation();
+                nlIndent();
+                this.sb.append("}");
                 break;
             default:
-                throw new DbcException("Invalide mode for Humidity Sensor!");
+                throw new DbcException("Invalide mode for IR Sensor!");
         }
         nlIndent();
-        this.sb.append("_irrecv_" + infraredSensor.getPort().getOraName() + ".resume()");
+        this.sb.append("return results;");
+        decrIndentation();
+        this.sb.append("\n}");
+    }
+
+    @Override
+    public Void visitInfraredSensor(InfraredSensor<Void> infraredSensor) {
+        this.sb.append("_getIRResults()");
         return null;
     }
 
@@ -390,10 +444,24 @@ public class CppVisitor extends ArduinoVisitor implements ArduinoAstVisitor<Void
             nlIndent();
             this.sb.append("unsigned long __time = millis(); \n");
         }
-        incrIndentation();
         generateUserDefinedMethods();
-        this.sb.append("\n \n void setup() \n");
+        for ( UsedSensor usedSensor : this.usedSensors ) {
+            if ( usedSensor.getType().equals(SensorType.INFRARED) ) {
+                this.sb.append("\n");
+                this.measureIRValue(usedSensor);
+                break;
+            }
+        }
+        for ( UsedConfigurationBlock usedConfigurationBlock : this.usedConfigurationBlocks ) {
+            if ( usedConfigurationBlock.getType().equals(ConfigurationBlockType.ULTRASONIC) ) {
+                this.sb.append("\n");
+                this.measureDistanceUltrasonicSensor(usedConfigurationBlock.getBlockName());
+                break;
+            }
+        }
+        this.sb.append("\n \nvoid setup() \n");
         this.sb.append("{");
+        incrIndentation();
         nlIndent();
         this.sb.append("Serial.begin(9600); ");
         nlIndent();
@@ -402,21 +470,6 @@ public class CppVisitor extends ArduinoVisitor implements ArduinoAstVisitor<Void
         this.sb.append("\n}\n");
         this.sb.append("\n").append("void loop() \n");
         this.sb.append("{");
-
-        for ( UsedConfigurationBlock usedConfigurationBlock : this.usedConfigurationBlocks ) {
-            if ( usedConfigurationBlock.getType().equals(ConfigurationBlockType.ULTRASONIC) ) {
-                nlIndent();
-                this.sb.append("digitalWrite(_trigger_" + usedConfigurationBlock.getBlockName() + ", LOW);");
-                nlIndent();
-                this.sb.append("delay(5);");
-                nlIndent();
-                this.sb.append("digitalWrite(_trigger_" + usedConfigurationBlock.getBlockName() + ", HIGH);");
-                nlIndent();
-                this.sb.append("delay(10);");
-                nlIndent();
-                this.sb.append("digitalWrite(_trigger_" + usedConfigurationBlock.getBlockName() + ", LOW);");
-            }
-        }
         return null;
     }
 
